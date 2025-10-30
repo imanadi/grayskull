@@ -1,11 +1,11 @@
 package com.flipkart.grayskull.audit;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.flipkart.grayskull.audit.utils.RequestUtils;
 import com.flipkart.grayskull.audit.utils.SanitizingObjectMapper;
 import com.flipkart.grayskull.entities.AuditEntryEntity;
 import com.flipkart.grayskull.models.dto.response.CreateSecretResponse;
 import com.flipkart.grayskull.models.dto.response.UpgradeSecretDataResponse;
+import com.flipkart.grayskull.spi.models.AuditEntry;
 import com.flipkart.grayskull.spi.repositories.AuditEntryRepository;
 import lombok.RequiredArgsConstructor;
 import org.aspectj.lang.JoinPoint;
@@ -41,7 +41,7 @@ import static com.flipkart.grayskull.audit.AuditConstants.*;
 public class AuditAspect {
 
     private final AuditEntryRepository auditEntryRepository;
-    private static final ObjectMapper OBJECT_MAPPER = SanitizingObjectMapper.create();
+    private final RequestUtils requestUtils;
 
     /**
      * Advice that runs after an audited method returns successfully.
@@ -68,29 +68,26 @@ public class AuditAspect {
      * @param result    the method's return value.
      */
     private void audit(JoinPoint joinPoint, Audit audit, Object result) {
-        try {
-            Map<String, Object> arguments = getMethodArguments(joinPoint);
+        Map<String, Object> arguments = getMethodArguments(joinPoint);
 
-            String projectId = (String) arguments.getOrDefault(PROJECT_ID_PARAM, UNKNOWN_VALUE);
-            String resourceName = extractResourceName(result, arguments);
-            Integer resourceVersion = extractResourceVersion(result);
+        String projectId = (String) arguments.getOrDefault(PROJECT_ID_PARAM, UNKNOWN_VALUE);
+        String resourceName = extractResourceName(result, arguments);
+        Integer resourceVersion = extractResourceVersion(result);
 
-            Map<String, String> metadata = buildMetadata(arguments, result);
+        Map<String, String> metadata = buildMetadata(arguments, result);
 
-            AuditEntryEntity entry = AuditEntryEntity.builder()
-                    .projectId(projectId)
-                    .resourceType(RESOURCE_TYPE_SECRET)
-                    .resourceName(resourceName)
-                    .resourceVersion(resourceVersion)
-                    .action(audit.action().name())
-                    .userId(getUserId())
-                    .metadata(metadata)
-                    .build();
+        AuditEntryEntity entry = AuditEntryEntity.builder()
+                .projectId(projectId)
+                .resourceType(RESOURCE_TYPE_SECRET)
+                .resourceName(resourceName)
+                .resourceVersion(resourceVersion)
+                .action(audit.action().name())
+                .userId(getUserId())
+                .ips(requestUtils.getRemoteIPs())
+                .metadata(metadata)
+                .build();
 
-            auditEntryRepository.save(entry);
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize audit metadata", e);
-        }
+        auditEntryRepository.save(entry);
     }
 
     /**
@@ -118,18 +115,17 @@ public class AuditAspect {
      * @param arguments the arguments passed to the intercepted method.
      * @param result    the result returned by the method.
      * @return A map of metadata for the audit entry.
-     * @throws JsonProcessingException if serialization of any argument or result fails.
      */
-    private Map<String, String> buildMetadata(Map<String, Object> arguments, Object result) throws JsonProcessingException {
+    private Map<String, String> buildMetadata(Map<String, Object> arguments, Object result) {
         Map<String, String> metadata = new HashMap<>();
         for (Map.Entry<String, Object> entry : arguments.entrySet()) {
             if (entry.getValue() != null) {
-                metadata.put(entry.getKey(), OBJECT_MAPPER.writeValueAsString(entry.getValue()));
+                metadata.put(entry.getKey(), SanitizingObjectMapper.getMaskedJson(result));
             }
         }
 
         if (result != null) {
-            metadata.put(RESULT_METADATA_KEY, OBJECT_MAPPER.writeValueAsString(result));
+            metadata.put(RESULT_METADATA_KEY, SanitizingObjectMapper.getMaskedJson(result));
         }
         return metadata;
     }
@@ -143,10 +139,10 @@ public class AuditAspect {
      * @return The resource version, or {@code null} if not applicable.
      */
     private Integer extractResourceVersion(Object result) {
-        if (result instanceof CreateSecretResponse) {
-            return ((CreateSecretResponse) result).getCurrentDataVersion();
-        } else if (result instanceof UpgradeSecretDataResponse) {
-            return ((UpgradeSecretDataResponse) result).getDataVersion();
+        if (result instanceof CreateSecretResponse secretResponse) {
+            return secretResponse.getCurrentDataVersion();
+        } else if (result instanceof UpgradeSecretDataResponse secretResponse) {
+            return secretResponse.getDataVersion();
         }
         return null;
     }
@@ -162,18 +158,18 @@ public class AuditAspect {
      */
     private String extractResourceName(Object result, Map<String, Object> arguments) {
         // Try to extract from response entity first (response schema is the source of truth)
-        if (result instanceof CreateSecretResponse) {
-            return ((CreateSecretResponse) result).getName();
-        } else if (result instanceof UpgradeSecretDataResponse) {
-            return ((UpgradeSecretDataResponse) result).getName();
+        if (result instanceof CreateSecretResponse secretResponse) {
+            return secretResponse.getName();
+        } else if (result instanceof UpgradeSecretDataResponse secretResponse) {
+            return secretResponse.getName();
         }
-        
+
         // Fall back to method arguments for void operations (like delete)
         Object name = arguments.get(SECRET_NAME_PARAM);
-        if (name instanceof String) {
-            return (String) name;
+        if (name instanceof String s) {
+            return s;
         }
-        
+
         return UNKNOWN_VALUE;
     }
 
